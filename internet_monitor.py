@@ -1,129 +1,194 @@
 import socket
 import os
+import re
 import subprocess
 import time
-import datetime
+import pytz
+from datetime import datetime, timedelta
 import configparser
 import pushover
 
-PING_HOST = "1.1.1.1"
+DEBUG = False  # More verbose output
+PING_HOST = "8.8.8.8"
 DNS_HOST = "www.google.com"
+PINGS = 5 # number of pings to get average
+INTERVAL = 60  # seconds
+TRIGGER = 3  # alert after number of misses
+
+#===========NO CHANGES BELOW THIS LONE------------------
+internet_up = False
+loss_percentage_count = 0
+
+utc_datetime = datetime.utcnow().replace(tzinfo=pytz.utc)
+est_timezone = pytz.timezone('US/Eastern')
 
 def logf(status, message):
     if status:
         schar = "(+)"
     else:
         schar = "(-)"
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"{timestamp} {schar} {message}\n"
     with open('/var/log/connection.log', 'a') as log_file:
         log_file.write(log_message)
 
-def check_internet():
-    try:
-        subprocess.check_output(
-            ["fping", PING_HOST]
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
 def check_dns():
     try:
-        # Try to resolve a known domain
         socket.gethostbyname(DNS_HOST)
         return True
     except socket.error:
         return False
 
 def send_pushover_notification(message, title):
-    # Send pushover notification
     try:
         client = pushover.PushoverClient("/etc/pushover2.creds")
         client.send_message(message, title=title)
-        #print(f"Pushover notification sent: {message}")
+        if DEBUG:
+            logf(True, f"Pushover notification sent: {message}")
     except Exception as e:
-        print(f"Failed to send pushover notification: {e}")
         logf(False, f"Failed to send pushover notification: {e}")
 
-internet_up = True
+def tz(dt):
+    dtd = dt.replace(tzinfo=pytz.utc)
+    est_datetime = dtd.astimezone(est_timezone)
+    if DEBUG:
+        print(f"UTC Timestamp: {dt.strftime('%c')}")     
+        print(f"EST Timestamp: {est_datetime.strftime('%c')}")
+    return est_datetime
+
+def format_time(seconds):
+    try:
+        time_delta = timedelta(seconds=seconds)
+        hours, remainder = divmod(time_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        time_parts = []
+        if hours > 0:
+            time_parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
+        if minutes > 0:
+            time_parts.append(f"{minutes} {'minute' if minutes == 1 else 'minutes'}")
+        if seconds > 0 or not time_parts:
+            time_parts.append(f"{seconds} {'second' if seconds == 1 else 'seconds'}")
+        formatted_time = ", ".join(time_parts)
+        return formatted_time
+    except Exception as e:
+        logf(False, "Format Time Error: {str(e)}")
+
 dns_up = True
+dns_fail_count = 0
 ping_fail_count = 0
 high_latency_count = 0
-ping_fail_time = None
-high_latency_time = None
+ping_fail_time = datetime.now()
+high_latency_time = datetime.now()
 notified = False
-print("Starting Internet Monitor Service")
+if DEBUG:
+    print("Starting Internet Monitor Service in DEBUG MODE")
+    print(f"Number of pings: {PINGS} pings for average")
+    print(f"Check Interval: {INTERVAL} Seconds")
+    print(f"Alert Trigger: {TRIGGER} Iterations")
+    logf(True, f"Starting Internet Monitor Service in DEBUG MODE, Interval: {INTERVAL} Seconds, {TRIGGER} Interations. {PINGS} Pings for average")
+else:
+    print("Starting Internet Monitor Service")
+    logf(True, "Starting Internet Monitor Service")
+
 while True:
     start_time = time.time() 
-    if check_internet():
-        if not internet_up:
-            downtime = datetime.datetime.now() - ping_fail_time
-            if not notified:
-                print(f"Internet check ping failed")
-                logf(False, f"Internet check ping failed")
-                notified = True
-            if ping_fail_count >= 3:
-                downtime = datetime.datetime.now() - ping_fail_time
-                send_pushover_notification(f"Internet is back from outage: {downtime}.", "Internet Outage")
-                print(f"Internet is back from outage: {downtime}.")
-                logf(True, f"Internet is back from outage: {downtime}")
-                notified = False
-            internet_up = True
-            ping_fail_count = 0
-            ping_fail_time = None
-            high_latency_time = None
+    try:
+        ping_output = subprocess.run(['fping', '-c', f"{PINGS}", PING_HOST], capture_output=True, text=True, check=True)
+        pattern = r'(\d+\.\d+)/(\d+\.\d+)/(\d+\.\d+)'
+        pingout = ping_output.stderr
+        #print(ping_output.stderr)
+        match = re.search(pattern, pingout)
+        if match:
+            ping_time = float(match.group(2))
+            if DEBUG:
+                logf(True, f"Avg Ping Time: {ping_time}")       
         else:
-            try:
-                ping_output = subprocess.check_output(
-                    ["fping", "-c", "3", PING_HOST],
-                    stderr=subprocess.DEVNULL,
-                    text=False,
-                )
-                ping_time = int((ping_output.decode()).split(" ")[7])
-                if ping_time > 1000:
-                    print(f"Latency check ping high: {ping_time}ms")
-                    logf(False, f"Latency check ping high: {ping_time}ms")
-                    if high_latency_count == 0:
-                        high_latency_time = datetime.datetime.now()
-                    high_latency_count += 1
-                    if high_latency_count == 3 and not notified:
-                        avg_latency = ping_time * high_latency_count
-                        send_pushover_notification(f"High internet latency! Average latency: {avg_latency}", "High Latency")
-                        print(f"High internet latency! Average latency: {avg_latency}")
-                        logf(False, f"High Internet latency! Average Latency: {avg_latency}")
-                        notified = True
-                else:
-                    if high_latency_count >= 3:
-                        downtime = datetime.datetime.now() - high_latency_time
-                        send_pushover_notification(f"Internet has recovered from high latency: {downtime}.", "Latency Recovered")
-                        print(f"Internet has recovered from high latency: {downtime}.")
-                        logf(True, f"Connection has recovered from high latency: {downtime}")
-                        notified = False
-                    high_latency_count = 0
-                    high_latency_time = None
-                    dns_state = check_dns()
-                if (not dns_state and dns_up and not notified):
-                    print("DNS Resolution failure")
-                    logf(False, "DNS resolution failure")
-                    send_pushover_notification("DNS resolution failure", "DNS Failure")
-                    notified = True
-                if (dns_state and not dns_up):
-                    print("DNS has recovered from failure")
-                    logf(True, "DNS has recovered from failure")
-                    send_pushover_notification("DNS has recovered from failure", "DNS Recovered")
+            logf(False, "Unable to parse fping output to get ping time")
+            ping_time = 99999
+        plpattern = r'(\d+)%, '
+        plmatch = re.search(plpattern, pingout)
+        if plmatch:
+            loss_percentage = int(plmatch.group(1))
+            if loss_percentage == 0:
+                if loss_percentage_count == TRIGGER:
+                    downtime = int((datetime.now() - loss_percentage_time).total_seconds())
+                    datetime_object = datetime.utcfromtimestamp(int(loss_percentage_time.timestamp()))
+                    formatted_datetime = datetime_object.strftime('%c')
+                    send_pushover_notification(f"Internet has recovered from packet loss of {loss_percentage}% from {formatted_datetime} which was {format_time(downtime)} ago", "Packet Loss")
+                    logf(True, f"Alert: Internet has recovered from packet loss of {loss_percentage}% from {formatted_datetime} which was {format_time(downtime)} ago")
                     notified = False
-                dns_up = dns_state
-            except (subprocess.CalledProcessError, ValueError):
-                pass
 
-    else:
-        if internet_up:
-           ping_fail_time = datetime.datetime.now()
+                loss_percentage_count = 0
+                loss_percentage_time = datetime.now()
+            if DEBUG:
+                logf(True, f"Packet Loss: {loss_percentage}%")
+            if loss_percentage > 0:
+                logf(True, f"Packet Loss: {loss_percentage}%")
+                loss_percentage_count += 1
+                loss_percentage_time = datetime.utcnow()
+                if loss_percentage_count >= TRIGGER:
+                    send_pushover_notification(f"Internet packet loss of {loss_percentage}% detected", "Packet Loss")
+                    logf(True, f"Alert: Internet packet loss of {loss_percentage}% detected")
+                    notified = True
+
+        else:
+           logf(False, "Unable to parse fping output to get packet loss")
+           loss_percentage = 99999
+        if ping_fail_count >= TRIGGER:
+            downtime = int((datetime.utcnow() - ping_fail_time).total_seconds())
+            datetime_object = datetime.utcfromtimestamp(int(ping_fail_time.timestamp()))
+            formatted_datetime = tz(datetime_object).strftime('%c')
+            send_pushover_notification(f"Internet is back from outage that started {formatted_datetime} which was {format_time(downtime)} ago", "Internet Outage")
+            logf(True, f"Alert: Internet is back from outage that started {formatted_datetime} {format_time(downtime)} ago")
+            notified = False
+        ping_fail_time = datetime.utcnow()
+        ping_fail_count = 0
+        internet_up = True
+
+    except subprocess.CalledProcessError as e:
         ping_fail_count += 1
         internet_up = False
+        if DEBUG:
+            logf(False, f"Missed ping to {PING_HOST} count ({ping_fail_count}/{TRIGGER})")
+        if ping_fail_count == 1:
+            ping_fail_time = datetime.utcnow()
+        if ping_fail_count >= TRIGGER and not notified:
+            logf(False, f"Alert: Internet is DOWN! Ping to {PING_HOST} has failed ({ping_fail_count}/{TRIGGER})")
+            notified = True
 
-    current_time = time.time()
-    elapsed_time = current_time - start_time
-    if elapsed_time < 10:
-        time.sleep(.1)
+    if ping_time > 1000:
+        high_latency_count += 1
+        if DEBUG:
+            logf(False, f"High Internet latency of {ping_time}ms detected count ({high_latency_count}/{TRIGGER})") 
+        if high_latency_count == 0:
+            high_latency_time = datetime.utcnow()
+        if high_latency_count >= TRIGGER and not notified:
+            send_pushover_notification(f"High Internet latency has been detected. Average latency: {ping_time}", "High Latency")
+            logf(False, f"Alert: High Internet latency has been detected. Average Latency: {ping_time}")
+            notified = True
+    else:
+        if high_latency_count >= TRIGGER:
+            downtime = int((datetime.utcnow() - high_latency_time).total_seconds())
+            datetime_object = datetime.utcfromtimestamp(int(high_latency_time.timestamp()))
+            formatted_datetime = tz(datetime_object.strftime('%c'))
+            send_pushover_notification(f"Internet has recovered from high latency that started {formatted_datetime} which was {format_time(downtime)} ago", "Latency Recovered")
+            logf(True, f"Alert: Internet has recovered from high latency that started {formatted_datetime} {format_time(downtime)} ago")
+            notified = False
+        high_latency_count = 0
+        high_latency_time = datetime.now()
+        if internet_up:
+            dns_state = check_dns()
+            if (not dns_state and dns_up):
+                dns_fail_count += 1
+                if dns_fail_count >= 3:
+                    logf(False, "Alert: DNS resolution failure")
+                    send_pushover_notification("DNS resolution failure", "DNS Failure")
+            if (dns_state and not dns_up):
+                if dns_fail_count >= 3:
+                    logf(True, "Alert: DNS has recovered from failure")
+                    send_pushover_notification("DNS has recovered from failure", "DNS Recovered")
+                dns_fail_count = 0
+            dns_up = dns_state
+
+    while time.time() - start_time < INTERVAL:
+        time.sleep(1)
