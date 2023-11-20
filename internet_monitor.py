@@ -115,7 +115,7 @@ while True:
                     datetime_object = datetime.utcfromtimestamp(int(loss_percentage_time.timestamp()))
                     formatted_datetime = datetime_object.strftime('%c')
                     send_pushover_notification(f"Internet has recovered from packet loss of {loss_percentage}% from {formatted_datetime} which was {format_time(downtime)} ago", "Packet Loss")
-                    logf(True, f"Alert: Internet has recovered from packet loss of {loss_percentage}% from {formatted_datetime} which was {format_time(downtime)} ago")
+                    logf(True, f"Alert: Internet has recovered from packet loss of {loss_percentage}% from {formatted_datetime} which was for {format_time(downtime)} in length")
                     notified = False
 
                 loss_percentage_count = 0
@@ -138,7 +138,7 @@ while True:
             downtime = int((datetime.utcnow() - ping_fail_time).total_seconds())
             datetime_object = datetime.utcfromtimestamp(int(ping_fail_time.timestamp()))
             formatted_datetime = tz(datetime_object).strftime('%c')
-            send_pushover_notification(f"Internet is back from outage that started {formatted_datetime} which was {format_time(downtime)} ago", "Internet Outage")
+            send_pushover_notification(f"Internet is back from outage that started {formatted_datetime} which was for {format_time(downtime)} in length", "Internet Outage")
             logf(True, f"Alert: Internet is back from outage that started {formatted_datetime} {format_time(downtime)} ago")
             notified = False
         ping_fail_time = datetime.utcnow()
@@ -171,7 +171,7 @@ while True:
             downtime = int((datetime.utcnow() - high_latency_time).total_seconds())
             datetime_object = datetime.utcfromtimestamp(int(high_latency_time.timestamp()))
             formatted_datetime = tz(datetime_object.strftime('%c'))
-            send_pushover_notification(f"Internet has recovered from high latency that started {formatted_datetime} which was {format_time(downtime)} ago", "Latency Recovered")
+            send_pushover_notification(f"Internet has recovered from high latency that started {formatted_datetime} which was for {format_time(downtime)} in length", "Latency Recovered")
             logf(True, f"Alert: Internet has recovered from high latency that started {formatted_datetime} {format_time(downtime)} ago")
             notified = False
         high_latency_count = 0
