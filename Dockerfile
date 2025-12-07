@@ -7,42 +7,35 @@ RUN apt-get update && \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Work directory for the app
 WORKDIR /app
 
-# Install Python dependencies
-# - flask: web UI
-# - pytz: timezone handling
-# - requests: Pushover HTTP API
+# Python deps
 RUN pip install --no-cache-dir \
     flask \
     pytz \
     requests
 
-# Copy Python applications
+# Application files
 COPY internet_monitor.py /app/internet_monitor.py
 COPY log_viewer.py       /app/log_viewer.py
+COPY healthcheck.py      /app/healthcheck.py
+COPY templates/          /app/templates/
+COPY entrypoint.sh       /entrypoint.sh
 
-# Copy Flask templates
-COPY templates/ /app/templates/
+RUN chmod +x /entrypoint.sh
 
-# Ensure log directory exists and create the log file
-RUN mkdir -p /var/log && \
-    touch /var/log/connection.log
+# Ensure log directory exists
+RUN mkdir -p /var/log
 
-# Environment variables:
-# - Shared config.ini path for both monitor + viewer
-# - Unbuffered Python output for real-time logs
 ENV INTERNET_MONITOR_CONFIG=/config/config.ini
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_ENV=production
 
-# Copy entrypoint script that starts both services
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Web UI port
+# Expose default web port (actual port is configurable in config.ini, but 5005 is the default)
 EXPOSE 5005
 
-# Start both the monitor and the log viewer
+# Healthcheck uses healthcheck.py which reads the real port from config.ini
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -u /app/healthcheck.py || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]

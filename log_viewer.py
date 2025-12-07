@@ -5,18 +5,17 @@ Simple read-only web viewer for the internet monitor log.
 Features:
 - Shows the last N lines from the connection log in a styled HTML table.
 - Restricts access by client IP, with allowed hosts configured in config.ini.
-- Reads log path and display options from the same config.ini as the monitor.
+- Reads log path, display options, and web port from config.ini.
 """
 
 import os
 import sys
 from typing import List, Dict, Any, Optional
 
-from flask import Flask, request, render_template, abort
+from flask import Flask, request, render_template
 import configparser
 import re
 from datetime import datetime
-
 
 # ==========================
 # CONFIG LOADING
@@ -30,6 +29,7 @@ LOG_PATH = "/var/log/connection.log"
 LINES_TO_SHOW = 200
 ALLOWED_HOSTS: List[str] = []   # If empty, no IP restriction
 PAGE_TITLE = "Internet Connection Log Viewer"
+FLASK_PORT: int = 5005          # Port the Flask app will listen on
 
 
 def load_config(path: str) -> None:
@@ -39,8 +39,9 @@ def load_config(path: str) -> None:
       - LINES_TO_SHOW   (from [web].lines)
       - ALLOWED_HOSTS   (from [web].allowed_hosts, comma-separated)
       - PAGE_TITLE      (from [web].title)
+      - FLASK_PORT      (from [web].port)
     """
-    global LOG_PATH, LINES_TO_SHOW, ALLOWED_HOSTS, PAGE_TITLE
+    global LOG_PATH, LINES_TO_SHOW, ALLOWED_HOSTS, PAGE_TITLE, FLASK_PORT
 
     parser = configparser.ConfigParser()
     read_files = parser.read(path)
@@ -76,10 +77,18 @@ def load_config(path: str) -> None:
     if parser.has_option("web", "title"):
         PAGE_TITLE = parser.get("web", "title")
 
+    if parser.has_option("web", "port"):
+        try:
+            FLASK_PORT = parser.getint("web", "port")
+        except ValueError:
+            print("WARNING: invalid [web].port value in config; "
+                  "falling back to default 5005.",
+                  file=sys.stderr)
+            FLASK_PORT = 5005
+
 
 # Load config at import time so globals are ready
 load_config(CONFIG_PATH)
-
 
 # ==========================
 # FLASK APP SETUP
@@ -102,7 +111,6 @@ def limit_remote_addr():
 
     client_ip = request.remote_addr
     if client_ip not in ALLOWED_HOSTS:
-        # You can log this if you like
         return "You're not allowed to access this resource", 403
 
 
@@ -115,9 +123,6 @@ def read_log_tail(path: str, max_lines: int) -> List[str]:
     if not os.path.exists(path):
         return []
 
-    # Simple approach is fine given the log size is modest.
-    # For very large logs, you could implement a buffered
-    # backwards seek, but this is sufficient for typical use.
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -154,8 +159,6 @@ def parse_log_line(line: str) -> Optional[Dict[str, Any]]:
     if not line.strip():
         return None
 
-    # Expected pattern: "YYYY-MM-DD HH:MM:SS (+) ...."
-    # We capture timestamp, sign (+/-), and message.
     m = re.match(
         r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\((\+|\-)\)\s+(.*)$",
         line,
@@ -207,8 +210,6 @@ def display_log():
         if parsed is not None:
             entries.append(parsed)
 
-    # Most recent entries at bottom (natural order from tail)
-    # If you prefer newest first, reverse=True in template or here.
     return render_template(
         "connection_log.html",
         entries=entries,
@@ -219,6 +220,5 @@ def display_log():
 
 
 if __name__ == "__main__":
-    # For Docker / production, you'll typically run this behind gunicorn or similar.
-    # This built-in dev server is enough for local use / testing.
-    app.run(host="0.0.0.0", port=5005, debug=False)
+    # Uses FLASK_PORT loaded from config.ini
+    app.run(host="0.0.0.0", port=FLASK_PORT, debug=False)

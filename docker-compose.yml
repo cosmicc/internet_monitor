@@ -3,36 +3,27 @@ version: "3.9"
 services:
   internet-monitor:
     container_name: internet-monitor
+
+    # IMPORTANT: build the image from the local Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Optional: tag the resulting image
     image: internet-monitor:latest
+
     restart: unless-stopped
 
-    # fping / ICMP needs this
     cap_add:
       - NET_RAW
 
-    # Expose the Flask log viewer on the host
     ports:
       - "5005:5005"
 
-    # Volumes:
-    # - config.ini is shared with both the monitor and the log viewer via /config/config.ini
-    # - connection.log is persisted on the host so you keep history across container rebuilds
     volumes:
       - ./config.ini:/config/config.ini:ro
       - ./connection.log:/var/log/connection.log
 
-    # Environment:
-    # INTERNET_MONITOR_CONFIG is already set in the Dockerfile, but you can override if needed.
     environment:
       INTERNET_MONITOR_CONFIG: /config/config.ini
       PYTHONUNBUFFERED: "1"
-
-    # If you want to control which interface the container uses for outbound traffic,
-    # you can attach it to a custom network, e.g.:
-    # networks:
-    #   - monitor-net
-
-# Optional custom network if you want isolation / specific IPAM
-#networks:
-#  monitor-net:
-#    driver: bridge
