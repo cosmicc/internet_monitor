@@ -18,7 +18,6 @@ import re
 import socket
 import subprocess
 import time
-import json  # NEW: for status file JSON
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
@@ -49,9 +48,6 @@ DNS_FAILURE_TRIGGER: int = 3
 
 LOG_PATH: str = "/var/log/connection.log"
 TIMEZONE: str = "America/Detroit"
-
-# Status file for web UI (final value set in load_config)
-STATUS_PATH: str = ""
 
 # Pushover defaults (token/user MUST be overridden in config for notifications to work)
 PUSHOVER_TOKEN: str = ""
@@ -90,14 +86,11 @@ def load_config(path: str) -> None:
         user = YOUR_USER_KEY
         device =                      ; optional (empty = all devices)
         priority = 0                  ; optional, default 0
-
-        [web]
-        status_path = /var/log/connection_status.json   ; optional
     """
     global DEBUG, PING_HOST, DNS_HOST, PINGS, INTERVAL, TRIGGER
     global HIGH_LATENCY_MS, DNS_FAILURE_TRIGGER, LOG_PATH, TIMEZONE
     global PUSHOVER_TOKEN, PUSHOVER_USER, PUSHOVER_DEVICE, PUSHOVER_PRIORITY
-    global LOCAL_TZ, STATUS_PATH
+    global LOCAL_TZ
 
     parser = configparser.ConfigParser()
     read_files = parser.read(path)
@@ -105,9 +98,6 @@ def load_config(path: str) -> None:
     if not read_files:
         print(f"WARNING: config file {path} not found, using built-in defaults.",
               file=sys.stderr)
-        # LOG_PATH and TIMEZONE remain defaults; derive STATUS_PATH from LOG_PATH
-        default_status_path = os.path.join(os.path.dirname(LOG_PATH) or "/", "connection_status.json")
-        STATUS_PATH = default_status_path
         LOCAL_TZ = pytz.timezone(TIMEZONE)
         return
 
@@ -151,14 +141,6 @@ def load_config(path: str) -> None:
     PUSHOVER_USER = get_str(section, "user", PUSHOVER_USER)
     PUSHOVER_DEVICE = get_str(section, "device", PUSHOVER_DEVICE)
     PUSHOVER_PRIORITY = get_int(section, "priority", PUSHOVER_PRIORITY)
-
-    # Status file path: look in [web] if present, else default next to LOG_PATH
-    default_status_path = os.path.join(os.path.dirname(LOG_PATH) or "/", "connection_status.json")
-    if parser.has_section("web"):
-        section = "web"
-        STATUS_PATH = get_str(section, "status_path", default_status_path)
-    else:
-        STATUS_PATH = default_status_path
 
     # Update timezone object
     try:
@@ -256,28 +238,6 @@ def logf(ok: bool, message: str) -> None:
             sys.stderr.write(line)
         except Exception:
             pass
-
-
-def write_status(internet_state: str, dns_state: str) -> None:
-    """
-    Write the current Internet/DNS status to STATUS_PATH as JSON.
-
-    States must be one of: "up", "down", "warning", "unknown".
-    Web UI reads this file and maps states to colors/text.
-    """
-    data = {
-        "timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "internet": {"state": internet_state},
-        "dns": {"state": dns_state},
-    }
-
-    status_dir = os.path.dirname(STATUS_PATH) or "/"
-    try:
-        os.makedirs(status_dir, exist_ok=True)
-        with open(STATUS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logf(False, f"Failed to write status file '{STATUS_PATH}': {e}")
 
 
 def check_dns(hostname: str) -> bool:
@@ -763,31 +723,6 @@ def main() -> None:
         # --------------------
         if connectivity_up:
             notifier.flush_queue()
-
-        # --------------------
-        # STATUS FILE FOR WEB UI
-        # --------------------
-        # Internet state:
-        # - down if connectivity_up is False
-        # - warning if we have ongoing loss or latency
-        # - up otherwise
-        if not connectivity_up:
-            internet_state = "down"
-        elif loss_iter_count > 0 or latency_iter_count > 0:
-            internet_state = "warning"
-        else:
-            internet_state = "up"
-
-        # DNS state:
-        # - unknown if internet is down (we're not checking DNS)
-        # - warning if there is an ongoing DNS failure
-        # - up otherwise
-        if not connectivity_up:
-            dns_state = "unknown"
-        else:
-            dns_state = "warning" if dns_fail_count > 0 else "up"
-
-        write_status(internet_state, dns_state)
 
         # --------------------
         # LOOP TIMING

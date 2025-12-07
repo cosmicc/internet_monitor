@@ -1,98 +1,192 @@
 #!/usr/bin/env python3
 """
-Simple read-only web viewer for the internet monitor log.
+Internet Monitor - Log Viewer Web UI
 
 Features:
-- Shows the last N lines from the connection log in a styled HTML table.
-- Restricts access by client IP, with allowed hosts configured in config.ini.
-- Reads log path, display options, and web port from config.ini.
+- Shows connection log (tail of the configured log file).
+- Displays Internet and DNS status indicators based on a shared status file
+  written by the monitor process after each check.
+- Status is considered valid only if the timestamp is recent; otherwise we
+  fall back to "Unknown" to avoid using stale state.
+- Allows clearing the log via a "Clear Log" button.
+- Optional IP allow-list based on [web].allowed_hosts in config.ini.
 """
 
+from __future__ import annotations
+
 import os
-import sys
-from typing import List, Dict, Any, Optional
-
-from flask import Flask, request, render_template
+import json
 import configparser
-import re
-from datetime import datetime
+from typing import List, Optional, Dict
+from datetime import datetime, timezone
 
-# ==========================
-# CONFIG LOADING
-# ==========================
+from flask import Flask, request, render_template, abort, redirect, url_for
 
-# Reuse same env var as the monitor for simplicity
-CONFIG_PATH = os.environ.get("INTERNET_MONITOR_CONFIG", "/config/config.ini")
+# ---------------------------------------------------------------------------
+# Config loading
+# ---------------------------------------------------------------------------
 
-# Defaults (overridden by config.ini)
-LOG_PATH = "/var/log/connection.log"
-LINES_TO_SHOW = 200
-ALLOWED_HOSTS: List[str] = []   # If empty, no IP restriction
-PAGE_TITLE = "Internet Connection Log Viewer"
-FLASK_PORT: int = 5005          # Port the Flask app will listen on
+CONFIG_ENV_VAR = "INTERNET_MONITOR_CONFIG"
+DEFAULT_CONFIG_PATH = "/config/internet_monitor/config.ini"
+CONFIG_PATH = os.environ.get(CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH)
+
+parser = configparser.ConfigParser()
+parser.read(CONFIG_PATH)
+
+if not parser.has_section("web"):
+    raise RuntimeError(f"[web] section missing in config file: {CONFIG_PATH}")
+
+WEB = parser["web"]
+
+TITLE: str = WEB.get("title", "Internet Connection Monitor")
+LOG_PATH: str = WEB.get("log_path", "/var/log/connection.log")
+LOG_LINES: int = WEB.getint("log_lines", 100)
+FLASK_PORT: int = WEB.getint("port", 5005)
+
+# Status file: defaults to same directory as log, name "connection_status.json"
+DEFAULT_STATUS_PATH = os.path.join(os.path.dirname(LOG_PATH), "connection_status.json")
+STATUS_PATH: str = WEB.get("status_path", DEFAULT_STATUS_PATH)
+
+# Max age in seconds for status to be considered "fresh".
+# If 0 or negative, the age check is disabled (status is always accepted).
+STATUS_MAX_AGE: int = WEB.getint("status_max_age", 300)  # default 5 minutes
+
+_raw_hosts = WEB.get("allowed_hosts", "").replace(",", " ")
+ALLOWED_HOSTS: List[str] = [h.strip() for h in _raw_hosts.split() if h.strip()]
+
+LOG_PATH = os.path.abspath(LOG_PATH)
+STATUS_PATH = os.path.abspath(STATUS_PATH)
 
 
-def load_config(path: str) -> None:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def load_log_lines(limit: Optional[int] = None) -> List[str]:
     """
-    Load [web] and [monitor] sections from config.ini to configure:
-      - LOG_PATH        (from [web].log_path or [monitor].log_path or default)
-      - LINES_TO_SHOW   (from [web].lines)
-      - ALLOWED_HOSTS   (from [web].allowed_hosts, comma-separated)
-      - PAGE_TITLE      (from [web].title)
-      - FLASK_PORT      (from [web].port)
+    Load lines from the log file.
+
+    If 'limit' is given, return only the last 'limit' lines.
     """
-    global LOG_PATH, LINES_TO_SHOW, ALLOWED_HOSTS, PAGE_TITLE, FLASK_PORT
+    if not os.path.exists(LOG_PATH):
+        return []
 
-    parser = configparser.ConfigParser()
-    read_files = parser.read(path)
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
 
-    if not read_files:
-        print(f"WARNING: config file {path} not found; "
-              f"using built-in defaults for web viewer.",
-              file=sys.stderr)
-        return
+    if not lines:
+        return []
 
-    # Prefer [web].log_path, fallback to [monitor].log_path, then default
-    if parser.has_option("web", "log_path"):
-        LOG_PATH = parser.get("web", "log_path")
-    elif parser.has_option("monitor", "log_path"):
-        LOG_PATH = parser.get("monitor", "log_path")
-
-    if parser.has_option("web", "lines"):
-        try:
-            LINES_TO_SHOW = parser.getint("web", "lines")
-        except ValueError:
-            print("WARNING: invalid [web].lines value in config; "
-                  "falling back to default.",
-                  file=sys.stderr)
-
-    if parser.has_option("web", "allowed_hosts"):
-        raw_hosts = parser.get("web", "allowed_hosts")
-        # Comma- or space-separated list
-        hosts = re.split(r"[,\s]+", raw_hosts.strip())
-        ALLOWED_HOSTS = [h for h in hosts if h]
-    else:
-        ALLOWED_HOSTS = []
-
-    if parser.has_option("web", "title"):
-        PAGE_TITLE = parser.get("web", "title")
-
-    if parser.has_option("web", "port"):
-        try:
-            FLASK_PORT = parser.getint("web", "port")
-        except ValueError:
-            print("WARNING: invalid [web].port value in config; "
-                  "falling back to default 5005.",
-                  file=sys.stderr)
-            FLASK_PORT = 5005
+    if limit is not None and limit > 0:
+        return lines[-limit:]
+    return lines
 
 
-# Load config at import time so globals are ready
-load_config(CONFIG_PATH)
+def load_log_text() -> str:
+    """
+    Return the last LOG_LINES lines as a single string for display.
+    """
+    lines = load_log_lines(LOG_LINES)
+    if not lines:
+        return ""
+    return "\n".join(lines)
 
-# ==========================
-# FLASK APP SETUP
-# ==========================
+
+def _format_status(state: str) -> Dict[str, str]:
+    """
+    Map a simple state string to the dict the template expects.
+
+    state: one of "up", "down", "warning", "unknown".
+    """
+    state = (state or "unknown").lower()
+
+    if state == "up":
+        return {"state": "up", "text": "Up", "css_class": "status-up"}
+    if state == "down":
+        return {"state": "down", "text": "Down", "css_class": "status-down"}
+    if state == "warning":
+        return {"state": "warning", "text": "Degraded", "css_class": "status-warning"}
+
+    return {"state": "unknown", "text": "Unknown", "css_class": "status-unknown"}
+
+
+def _status_is_fresh(ts_str: str) -> bool:
+    """
+    Return True if the given ISO8601-like timestamp is within STATUS_MAX_AGE seconds.
+    Timestamps are expected like "2025-12-07T12:34:56Z" (UTC).
+    """
+    if STATUS_MAX_AGE <= 0:
+        # Age checking disabled
+        return True
+
+    if not ts_str:
+        return False
+
+    try:
+        # Parse as UTC with trailing Z
+        ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+
+    now = datetime.now(timezone.utc)
+    age = (now - ts).total_seconds()
+    return age >= 0 and age <= STATUS_MAX_AGE
+
+
+def load_status() -> tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Load Internet + DNS status from STATUS_PATH.
+
+    Expected JSON structure written by the monitor:
+
+        {
+          "timestamp": "2025-12-07T12:34:56Z",
+          "internet": {"state": "up" | "down" | "warning" | "unknown"},
+          "dns":      {"state": "up" | "down" | "warning" | "unknown"}
+        }
+
+    Behavior:
+      - If the file does not exist, both statuses are "unknown".
+      - If the timestamp is older than STATUS_MAX_AGE seconds, both are "unknown".
+      - If parsing fails, both are "unknown".
+    """
+    if not os.path.exists(STATUS_PATH):
+        return _format_status("unknown"), _format_status("unknown")
+
+    try:
+        with open(STATUS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return _format_status("unknown"), _format_status("unknown")
+
+    if not isinstance(data, dict):
+        return _format_status("unknown"), _format_status("unknown")
+
+    ts_str = data.get("timestamp", "")
+    if not _status_is_fresh(ts_str):
+        # Too old to trust
+        return _format_status("unknown"), _format_status("unknown")
+
+    internet_state = "unknown"
+    dns_state = "unknown"
+
+    internet = data.get("internet")
+    dns = data.get("dns")
+
+    if isinstance(internet, dict):
+        internet_state = internet.get("state", "unknown")
+    if isinstance(dns, dict):
+        dns_state = dns.get("state", "unknown")
+
+    return _format_status(internet_state), _format_status(dns_state)
+
+
+# ---------------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------------
 
 app = Flask(__name__)
 
@@ -100,125 +194,53 @@ app = Flask(__name__)
 @app.before_request
 def limit_remote_addr():
     """
-    Restrict access based on client IP address.
-
-    - If ALLOWED_HOSTS is empty, no restriction is applied.
-    - Otherwise, request.remote_addr must be in ALLOWED_HOSTS.
+    Optional IP restriction based on [web].allowed_hosts.
+    If the list is empty, allow all.
     """
     if not ALLOWED_HOSTS:
-        # No restriction configured
         return
 
-    client_ip = request.remote_addr
-    if client_ip not in ALLOWED_HOSTS:
-        return "You're not allowed to access this resource", 403
+    remote = request.remote_addr
+    if remote not in ALLOWED_HOSTS:
+        abort(403, description="You're not allowed to access this resource")
 
 
-def read_log_tail(path: str, max_lines: int) -> List[str]:
-    """
-    Efficiently read the last max_lines lines from a text file.
-
-    If the file does not exist, returns an empty list.
-    """
-    if not os.path.exists(path):
-        return []
-
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-    except OSError as e:
-        print(f"ERROR: unable to read log file '{path}': {e}",
-              file=sys.stderr)
-        return []
-
-    if max_lines <= 0:
-        return lines
-    return lines[-max_lines:]
-
-
-def parse_log_line(line: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse a single log line of the form:
-
-        YYYY-MM-DD HH:MM:SS (+) Message text...
-
-    Returns a dict with:
-        {
-          "raw": str,
-          "timestamp": datetime | None,
-          "timestamp_str": str,
-          "level": "ok" | "error" | "unknown",
-          "status_char": "+" | "-" | "?",
-          "message": str,
-        }
-
-    If the line doesn't match the expected format, it is still returned
-    with 'unknown' level.
-    """
-    line = line.rstrip("\n")
-    if not line.strip():
-        return None
-
-    m = re.match(
-        r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\((\+|\-)\)\s+(.*)$",
-        line,
-    )
-
-    ts: Optional[datetime] = None
-    ts_str = ""
-    status_char = "?"
-    level = "unknown"
-    msg = line
-
-    if m:
-        ts_str = m.group(1)
-        status_char = m.group(2)
-        msg = m.group(3)
-
-        try:
-            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            ts = None
-
-        if status_char == "+":
-            level = "ok"
-        elif status_char == "-":
-            level = "error"
-        else:
-            level = "unknown"
-
-    return {
-        "raw": line,
-        "timestamp": ts,
-        "timestamp_str": ts_str,
-        "level": level,
-        "status_char": status_char,
-        "message": msg,
-    }
+@app.route("/health")
+def health():
+    return "ok", 200
 
 
 @app.route("/")
-def display_log():
-    """
-    Display the last N lines of the connection log in a simple HTML table.
-    """
-    lines = read_log_tail(LOG_PATH, LINES_TO_SHOW)
-    entries: List[Dict[str, Any]] = []
-
-    for line in lines:
-        parsed = parse_log_line(line)
-        if parsed is not None:
-            entries.append(parsed)
+def index():
+    log_text = load_log_text()
+    internet_status, dns_status = load_status()
 
     return render_template(
-        "connection_log.html",
-        entries=entries,
-        page_title=PAGE_TITLE,
+        "index.html",
+        title=TITLE,
+        log=log_text,
+        log_lines=LOG_LINES,
         log_path=LOG_PATH,
-        lines_to_show=LINES_TO_SHOW,
+        internet_status=internet_status,
+        dns_status=dns_status,
     )
 
 
+@app.route("/clear-log", methods=["POST"])
+def clear_log():
+    """
+    Truncate the log file to zero bytes (create if missing),
+    then redirect back to the main page.
+    """
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "w", encoding="utf-8"):
+            pass
+    except OSError:
+        pass
+
+    return redirect(url_for("index"))
+
+
 if __name__ == "__main__":
-    # Uses FLASK_PORT loaded from config.ini
-    app.run(host="0.0.0.0", port=FLASK_PORT, debug=False)
+    app.run(host="0.0.0.0", port=FLASK_PORT, debug=True)
