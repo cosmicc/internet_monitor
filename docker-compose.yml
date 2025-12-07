@@ -1,0 +1,29 @@
+services:
+  internet-monitor:
+    container_name: internet-monitor
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: internet-monitor:latest
+    restart: unless-stopped
+
+    cap_add:
+      - NET_RAW
+
+    # Host:container port
+    # If [web].port in config.ini is changed, make sure container port matches.
+    ports:
+      - "5005:5005"
+
+    volumes:
+      # Host config -> container config
+      - /config/internet_monitor/config.ini:/config/internet_monitor/config.ini:ro
+
+      # Host log file -> container log file
+      - /var/log/connection.log:/var/log/connection.log
+
+    environment:
+      INTERNET_MONITOR_CONFIG: /config/internet_monitor/config.ini
+      PYTHONUNBUFFERED: "1"
