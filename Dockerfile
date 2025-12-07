@@ -24,17 +24,18 @@ COPY entrypoint.sh       /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh
 
-# Ensure log directory exists
-RUN mkdir -p /var/log
+# Make sure these dirs exist *inside* the container
+RUN mkdir -p /var/log && mkdir -p /config/internet_monitor
 
-ENV INTERNET_MONITOR_CONFIG=/config/config.ini
+# Config path inside the container
+ENV INTERNET_MONITOR_CONFIG=/config/internet_monitor/config.ini
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_ENV=production
 
-# Expose default web port (actual port is configurable in config.ini, but 5005 is the default)
+# Default web port (actual port still comes from [web].port in config.ini)
 EXPOSE 5005
 
-# Healthcheck uses healthcheck.py which reads the real port from config.ini
+# Healthcheck uses healthcheck.py, which reads INTERNET_MONITOR_CONFIG
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -u /app/healthcheck.py || exit 1
 
