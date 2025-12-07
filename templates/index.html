@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <title>{{ title or "Internet Connection Monitor" }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <!-- Auto refresh every 60 seconds -->
-    <meta http-equiv="refresh" content="60">
+    <!-- Auto refresh based on monitor interval -->
+    <meta http-equiv="refresh" content="{{ refresh_interval }}">
 
     <style>
         body {

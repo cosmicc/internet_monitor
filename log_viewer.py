@@ -8,6 +8,7 @@ Features:
   written by the monitor process after each check.
 - Status is considered valid only if the timestamp is recent; otherwise we
   fall back to "Unknown" to avoid using stale state.
+- Auto-refresh interval is tied to [monitor].interval from config.ini.
 - Allows clearing the log via a "Clear Log" button.
 - Optional IP allow-list based on [web].allowed_hosts in config.ini.
 """
@@ -56,6 +57,14 @@ ALLOWED_HOSTS: List[str] = [h.strip() for h in _raw_hosts.split() if h.strip()]
 
 LOG_PATH = os.path.abspath(LOG_PATH)
 STATUS_PATH = os.path.abspath(STATUS_PATH)
+
+# Auto-refresh interval: follow [monitor].interval if present, otherwise default 60
+REFRESH_INTERVAL: int = 60
+if parser.has_section("monitor") and parser.has_option("monitor", "interval"):
+    try:
+        REFRESH_INTERVAL = parser.getint("monitor", "interval")
+    except ValueError:
+        REFRESH_INTERVAL = 60
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +232,7 @@ def index():
         log_path=LOG_PATH,
         internet_status=internet_status,
         dns_status=dns_status,
+        refresh_interval=REFRESH_INTERVAL,
     )
 
 
